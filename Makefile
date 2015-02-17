@@ -5,6 +5,8 @@ RELEASE=$(shell awk '/Release:/ { print $$2 }' $(SPECFILE) | sed -e 's|%.*$$||g'
 RELEASE_TAG=$(PKGNAME)-$(VERSION)-$(RELEASE)
 VERSION_TAG=$(PKGNAME)-$(VERSION)
 
+PYTHON=python2
+
 TX_PULL_ARGS = -a
 TX_PUSH_ARGS = -s
 
@@ -16,7 +18,7 @@ po-pull:
 
 test:
 	@echo "*** Running unittests ***"
-	PYTHONPATH=.:tests/ python -m unittest discover -v -s tests/ -p '*_test.py'
+	PYTHONPATH=.:tests/ $(PYTHON) -m unittest discover -v -s tests/ -p '*_test.py'
 
 coverage:
 	@which coverage || (echo "*** Please install python-coverage ***"; exit 2)
@@ -27,10 +29,10 @@ coverage:
 clean:
 	-rm *.tar.gz blivet/*.pyc blivet/*/*.pyc ChangeLog
 	$(MAKE) -C po clean
-	python setup.py -q clean --all
+	$(PYTHON) setup.py -q clean --all
 
 install:
-	python setup.py install --root=$(DESTDIR)
+	$(PYTHON) setup.py install --root=$(DESTDIR)
 	$(MAKE) -C po install
 
 ChangeLog:
@@ -68,7 +70,7 @@ local: po-pull
 	@rm -rf $(PKGNAME)-$(VERSION).tar.gz
 	@rm -rf /tmp/$(PKGNAME)-$(VERSION) /tmp/$(PKGNAME)
 	@dir=$$PWD; cp -a $$dir /tmp/$(PKGNAME)-$(VERSION)
-	@cd /tmp/$(PKGNAME)-$(VERSION) ; python setup.py -q sdist
+	@cd /tmp/$(PKGNAME)-$(VERSION) ; $(PYTHON) setup.py -q sdist
 	@cp /tmp/$(PKGNAME)-$(VERSION)/dist/$(PKGNAME)-$(VERSION).tar.gz .
 	@rm -rf /tmp/$(PKGNAME)-$(VERSION)
 	@echo "The archive is in $(PKGNAME)-$(VERSION).tar.gz"
