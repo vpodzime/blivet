@@ -1376,7 +1376,7 @@ class DeviceTree(object):
             log.debug("no LVs listed for VG %s", vg_name)
             return
 
-        def addRequiredLV(name, msg, device_name=None):
+        def addRequiredLV(name, msg):
             """ Add a prerequisite/parent LV.
 
                 The parent is strictly required in order to be able to add
@@ -1390,10 +1390,10 @@ class DeviceTree(object):
                 :raises: :class:`~.errors.DeviceTreeError` on failure
 
             """
-            vol = self.getDeviceByName(device_name or name)
+            vol = self.getDeviceByName(name)
             if vol is None:
                 addLV(lv_info[name])
-                vol = self.getDeviceByName(device_name or name)
+                vol = self.getDeviceByName(name)
 
                 if vol is None:
                     log.error("%s: %s", msg, name)
@@ -1430,8 +1430,8 @@ class DeviceTree(object):
                     origin = None
                 else:
                     origin_device_name = "%s-%s" % (vg_name, origin_name)
-                    addRequiredLV(origin_name, "failed to locate origin lv",
-                                  origin_device_name)
+                    addRequiredLV(origin_device_name,
+                                  "failed to locate origin lv")
                     origin = self.getDeviceByName(origin_device_name)
 
                 lv_kwargs["origin"] = origin
@@ -1471,7 +1471,7 @@ class DeviceTree(object):
                 # thin volume
                 pool_name = blockdev.lvm_thlvpoolname(vg_name, lv_name)
                 pool_device_name = "%s-%s" % (vg_name, pool_name)
-                addRequiredLV(pool_name, "failed to look up thin pool", pool_device_name)
+                addRequiredLV(pool_device_name, "failed to look up thin pool")
 
                 origin_name = blockdev.lvm_lvorigin(vg_name, lv_name)
                 if origin_name:
