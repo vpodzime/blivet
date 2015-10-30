@@ -156,20 +156,20 @@ class iscsi(object):
     def __call__(self):
         return self
 
-    def _getInitiator(self):
+    @property
+    def initiator(self):
         if self._initiator != "":
             return self._initiator
 
         return util.capture_output(["iscsi-iname"]).strip()
 
-    def _setInitiator(self, val):
+    @initiator.setter
+    def initiator(self, val):
         if self.initiatorSet and val != self._initiator:
             raise ValueError(_("Unable to change iSCSI initiator name once set"))
         if len(val) == 0:
             raise ValueError(_("Must provide an iSCSI initiator name"))
         self._initiator = val
-
-    initiator = property(_getInitiator, _setInitiator)
 
     def active_nodes(self, target=None):
         """Nodes logged in to"""
@@ -182,15 +182,14 @@ class iscsi(object):
                     itertools.chain(*list(self.discovered_targets.values()))
                     if logged_in] + self.ibftNodes
 
-    def _getMode(self):
+    @property
+    def mode(self):
         if not self.active_nodes():
             return "none"
         if self.ifaces:
             return "bind"
         else:
             return "default"
-
-    mode = property(_getMode)
 
     def _mark_node_active(self, node, active=True):
         """Mark node as one logged in to
