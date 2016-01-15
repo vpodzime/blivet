@@ -29,6 +29,7 @@ import os
 import time
 import itertools
 from collections import namedtuple
+from functools import wraps
 
 import gi
 gi.require_version("BlockDev", "1.0")
@@ -1081,13 +1082,21 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
             # not found, let the caller know
             return (False, None)
 
+    def type_specific(meth):
+        @wraps(meth)
+        def decorated(self, *args, **kwargs):
+            found, ret = self._try_specific_call(meth.__name__, self, *args, **kwargs)
+            if found:
+                # nothing more to do here
+                return ret
+            else:
+                return meth(self, *args, **kwargs)
+
+        return decorated
+
+    @type_specific
     def _check_parents(self):
         """Check that this device has parents as expected"""
-        found, ret = self._try_specific_call("_check_parents")
-        if found:
-            # nothing more to do here
-            return ret
-
         if isinstance(self.parents, (list, ParentList)):
             if len(self.parents) != 1:
                 raise ValueError("constructor requires a single %s instance" % self._container_class.__name__)
@@ -1099,22 +1108,14 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         if not isinstance(container, self._container_class):
             raise ValueError("constructor requires a %s instance" % self._container_class.__name__)
 
+    @type_specific
     def _add_to_parents(self):
         """Add this device to its parents"""
-        found, ret = self._try_specific_call("_check_parents")
-        if found:
-            # nothing more to do here
-            return ret
-
         # a normal LV has only exactly one parent -- the VG it belongs to
         self._parents[0]._add_log_vol(self)
 
+    @type_specific
     def _set_size(self, size):
-        found, ret = self._try_specific_call("_check_parents", size)
-        if found:
-            # nothing more to do here
-            return ret
-
         if not isinstance(size, Size):
             raise ValueError("new size must of type Size")
 
@@ -1134,6 +1135,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
     size = property(StorageDevice._get_size, _set_size)
 
     @property
+    @type_specific
     def max_size(self):
         """ The maximum size this lv can be. """
         max_lv = self.size + self.vg.free_space
@@ -1142,6 +1144,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
 
 
     @property
+    @type_specific
     def vg_space_used(self):
         """ Space occupied by this LV, not including snapshots. """
         if self.cached:
