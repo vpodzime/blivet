@@ -87,6 +87,11 @@ PVFreeInfo = namedtuple("PVFreeInfo", ["pv", "size", "free"])
 """ A namedtuple class holding the information about PV's (usable) size and free space """
 
 
+class NotTypeSpecific(Exception):
+    """Exception class for invalid type-specific calls"""
+    pass
+
+
 class LVMVolumeGroupDevice(ContainerDevice):
 
     """ An LVM Volume Group """
@@ -562,7 +567,7 @@ class LVMLogicalVolumeBase(DMDevice, RaidDevice):
     """Abstract base class for LVM LVs
 
     Attributes, properties and methods defined in this class are common too all
-    LVs.
+    LVs (including implementation).
 
     """
 
@@ -700,16 +705,6 @@ class LVMLogicalVolumeBase(DMDevice, RaidDevice):
         if self.cached:
             ret += self.cache.md_size
         return ret
-
-    def __repr__(self):
-        s = DMDevice.__repr__(self)
-        s += ("  VG device = %(vgdev)r\n"
-              "  segment type = %(type)s percent = %(percent)s\n"
-              "  VG space used = %(vgspace)s" %
-              {"vgdev": self.vg, "percent": self.req_percent,
-               "type": self.seg_type,
-               "vgspace": self.vg_space_used})
-        return s
 
     @property
     def dict(self):
@@ -849,9 +844,6 @@ class LVMInternalLogicalVolumeMixin(object):
             self._parent_lv.add_internal_lv(self)
             self._vg = self._parent_lv.vg
 
-    # def _check(self):
-    #     return (True, [])
-
     @property
     def is_internal_lv(self):
         return bool(self._parent_lv)
@@ -869,6 +861,110 @@ class LVMInternalLogicalVolumeMixin(object):
         self._parent_lv = parent_lv
         if self._parent_lv:
             self._parent_lv.add_internal_lv(self)
+
+    # TODO: SOLVE THIS!
+    # @property
+    # @util.requires_property("is_internal_lv")
+    # def takes_extra_space(self):
+    #     ?????
+    #
+    # @classmethod
+    # def is_name_valid(cls, name):
+    #     # override checks for normal LVs, internal LVs typically have names that
+    #     # are forbidden for normal LVs
+    #     return True
+
+    def _check_parents(self):
+        # an internal LV should have no parents
+        if self._parents:
+            raise ValueError("an internal LV should have no parents")
+
+    def _add_to_parents(self):
+        # nothing to do here, an internal LV has no parents (in the DeviceTree's
+        # meaning of 'parents')
+        pass
+
+    # internal LVs follow different rules limitting size
+    def _set_size(self, size):
+        if not isinstance(size, Size):
+            raise ValueError("new size must of type Size")
+
+        if not self.takes_extra_space:
+            if size <= self.parent_lv.size:
+                self._size = size
+            else:
+                raise ValueError("Internal LV cannot be bigger than its parent LV")
+        else:
+            # same rules apply as for any other LV
+            raise NotTypeSpecific()
+
+    @property
+    def max_size(self):
+        # no format, so maximum size is only limitted by either the parent LV or the VG
+        if not self.takes_extra_space:
+            return self._parent_lv.max_size
+        else:
+            return self.size + self.vg.free_space
+
+    def __repr__(self):
+        s = "%s:\n" % self.__class__.__name__
+        s += ("  name = %s, status = %s exists = %s\n" % (self.lvname, self.status, self.exists))
+        s += ("  uuid = %s, size = %s\n" % (self.uuid, self.size))
+        s += ("  parent LV = %r\n" % self.parent_lv)
+        s += ("  VG device = %(vgdev)r\n"
+              "  segment type = %(type)s percent = %(percent)s\n"
+              "  VG space used = %(vgspace)s" %
+              {"vgdev": self.vg, "percent": self.req_percent,
+               "type": self.seg_type,
+               "vgspace": self.vg_space_used})
+        return s
+
+    # generally changes should be done on the parent LV (exceptions should
+    # override these)
+    def setup(self, orig=False):
+        raise errors.DeviceError("An internal LV cannot be set up separately")
+
+    def teardown(self, recursive=None):
+        raise errors.DeviceError("An internal LV cannot be torn down separately")
+
+    def destroy(self):
+        raise errors.DeviceError("An internal LV cannot be destroyed separately")
+
+    def resize(self):
+        raise errors.DeviceError("An internal LV cannot be resized")
+
+    @property
+    def growable(self):
+        return False
+
+    @property
+    def display_lvname(self):
+        """Name of the internal LV as displayed by the lvm utilities"""
+        return "[%s]" % self.lvname
+
+    # these two methods are not needed right now, because they are only called
+    # when devices are added/removed to/from the DeviceTree, but they may come
+    # handy in the future
+    def add_hook(self, new=True):
+        # skip LVMLogicalVolumeDevice in the class hierarchy -- we don't want to
+        # add an internal LV to the VG (it's only referenced by the parent LV)
+        # pylint: disable=bad-super-call
+        DMDevice.add_hook(self, new=new)
+        self._parent_lv.add_internal_lv(self)
+
+    def remove_hook(self, modparent=True):
+        if modparent:
+            self._parent_lv.remove_internal_lv(self)
+
+        # skip LVMLogicalVolumeDevice in the class hierarchy -- we cannot remove
+        # an internal LV from the VG (it's only referenced by the parent LV)
+        # pylint: disable=bad-super-call
+        DMDevice.remove_hook(self, modparent=modparent)
+
+    @property
+    def direct(self):
+        # internal LVs are not directly accessible
+        return False
 
 
 class LVMSnapshotMixin(object):
@@ -904,11 +1000,22 @@ class LVMSnapshotMixin(object):
     def is_snapshot_lv(self):
         return bool(self.origin or self.vorigin)
 
+    # decorator
+    def old_snapshot_specific(meth):
+        """Decorator for methods that are specific only to old snapshots"""
+        @wraps(meth)
+        def decorated(self, *args, **kwargs):
+            if self.is_thin_lv:
+                raise NotTypeSpecific()
+            else:
+                return getattr(self, meth)(*args, **kwargs)
+        return decorated
+
     @util.requires_property("is_snapshot_lv")
     def merge(self):
         """ Merge the snapshot back into its origin volume. """
-        log_method_call(self, self.name, status=self.status)  # pylint: disable=no-member
-        self.vg.setup()    # pylint: disable=no-member
+        log_method_call(self, self.name, status=self.status)
+        self.vg.setup()
         try:
             self.origin.teardown()
         except errors.FSError:
@@ -917,12 +1024,115 @@ class LVMSnapshotMixin(object):
             pass
 
         try:
-            self.teardown()  # pylint: disable=no-member
+            self.teardown()
         except errors.FSError:
             pass
 
         udev.settle()
-        blockdev.lvm.lvsnapshotmerge(self.vg.name, self.lvname)  # pylint: disable=no-member
+        blockdev.lvm.lvsnapshotmerge(self.vg.name, self.lvname)
+
+    @util.requires_property("is_snapshot_lv")
+    def _update_format_from_origin(self):
+        """ Update the snapshot's format to reflect the origin's.
+
+            .. note::
+                This should only be called for non-existent snapshot devices.
+                Once a snapshot exists its format is distinct from that of its
+                origin.
+
+        """
+        fmt = copy.deepcopy(self.origin.format)
+        fmt.exists = False
+        if hasattr(fmt, "mountpoint"):
+            fmt.mountpoint = ""
+            fmt._chrooted_mountpoint = None
+            fmt.device = self.path
+
+        super(LVMSnapShotBase, self)._set_format(fmt)
+
+    def _set_format(self, fmt):
+        # If a snapshot exists it can have a format that is distinct from its
+        # origin's. If it does not exist its format must be a copy of its
+        # origin's.
+        if self.exists:
+            super(LVMSnapShotBase, self)._set_format(fmt)
+        else:
+            log.info("copying %s origin's format", self.name)
+            self._update_format_from_origin()
+
+    @old_snapshot_specific
+    def setup(self, orig=False):
+        # the old snapshot cannot be setup and torn down
+        pass
+
+    def _setup(self, orig=False):
+        """ Open, or set up, a device. """
+        log_method_call(self, self.name, orig=orig, status=self.status,
+                        controllable=self.controllable)
+        blockdev.lvm.lvactivate(self.vg.name, self._name, ignore_skip=True)
+
+    @old_snapshot_specific
+    def teardown(self, recursive=False):
+        # the old snapshot cannot be setup and torn down
+        pass
+
+    def _create(self):
+        """ Create the device. """
+        if not self.is_thin_lv:
+            log_method_call(self, self.name, status=self.status)
+            blockdev.lvm.lvsnapshotcreate(self.vg.name, self.origin.lvname, self._name, self.size)
+        else:
+            pool_name = None
+            if not isinstance(self.origin, LVMThinLogicalVolumeDevice):
+                # if the origin is not a thin volume we need to tell lvm which pool
+                # to use
+                pool_name = self.pool.lvname
+
+            blockdev.lvm.thsnapshotcreate(self.vg.name, self.origin.lvname, self._name,
+                                          pool_name=pool_name)
+
+
+    def _post_create(self):
+        super(LVMThinSnapShotDevice, self)._post_create()
+        if self.is_thin_lv:
+            # A snapshot's format exists as soon as the snapshot has been created.
+            self.format.exists = True
+
+    @old_snapshot_specific
+    def _destroy(self):
+        """ Destroy the device. """
+        log_method_call(self, self.name, status=self.status)
+        # old-style snapshots' status is tied to the origin's so we never
+        # explicitly activate or deactivate them and we have to tell lvremove
+        # that it is okay to remove the active snapshot
+        blockdev.lvm.lvremove(self.vg.name, self._name, force=True)
+
+    @old_snapshot_specific
+    def _get_parted_device_path(self):
+        return "%s-cow" % self.path
+
+    def depends_on(self, dep):
+        if self.is_thin_lv:
+            return ((self.origin == dep and not self.exists) or
+                    super(LVMThinSnapShotDevice, self).depends_on(dep))
+        else:
+            # pylint: disable=bad-super-call
+            return (self.origin == dep or
+                    super(LVMSnapShotBase, self).depends_on(dep))
+
+    @old_snapshot_specific
+    def read_current_size(self):
+        log_method_call(self, exists=self.exists, path=self.path,
+                        sysfs_path=self.sysfs_path)
+        size = Size(0)
+        if self.exists and os.path.isdir(self.sysfs_path):
+            cow_sysfs_path = util.get_cow_sysfs_path(self.path, self.sysfs_path)
+
+            if os.path.exists(cow_sysfs_path) and os.path.isdir(cow_sysfs_path):
+                blocks = int(util.get_sysfs_attr(cow_sysfs_path, "size"))
+                size = Size(blocks * LINUX_SECTOR_SIZE)
+
+        return size
 
 
 class LVMThinPoolMixin(object):
@@ -951,6 +1161,69 @@ class LVMThinPoolMixin(object):
     def free_space(self):
         return self.size - self.used_space
 
+    @util.requires_property("is_thin_pool")
+    def _add_log_vol(self, lv):
+        """ Add an LV to this pool. """
+        if lv in self._lvs:
+            raise ValueError("lv is already part of this vg")
+
+        # TODO: add some checking to prevent overcommit for preexisting
+        self.vg._add_log_vol(lv)
+        log.debug("Adding %s/%s to %s", lv.name, lv.size, self.name)
+        self._lvs.append(lv)
+
+    @util.requires_property("is_thin_pool")
+    def _remove_log_vol(self, lv):
+        """ Remove an LV from this pool. """
+        if lv not in self._lvs:
+            raise ValueError("specified lv is not part of this vg")
+
+        self._lvs.remove(lv)
+        self.vg._remove_log_vol(lv)
+
+    @property
+    @util.requires_property("is_thin_pool")
+    def lvs(self):
+        """ A list of this pool's LVs """
+        return self._lvs[:]     # we don't want folks changing our list
+
+    @property
+    def vg_space_used(self):
+        space = super(LVMThinPoolDevice, self).vg_space_used
+        space += Size(blockdev.lvm.get_thpool_padding(space, self.vg.pe_size))
+        return space
+
+    def _create(self):
+        """ Create the device. """
+        log_method_call(self, self.name, status=self.status)
+        if self.profile:
+            profile_name = self.profile.name
+        else:
+            profile_name = None
+        # TODO: chunk size, data/metadata split --> profile
+        # TODO: allow for specification of PVs
+        blockdev.lvm.thpoolcreate(self.vg.name, self.lvname, self.size,
+                                  md_size=self.metadata_size,
+                                  chunk_size=self.chunk_size,
+                                  profile=profile_name)
+
+    def dracut_setup_args(self):
+        return set()
+
+    @property
+    def direct(self):
+        """ Is this device directly accessible? """
+        return False
+
+    def populate_ksdata(self, data):
+        super(LVMThinPoolDevice, self).populate_ksdata(data)
+        data.mountpoint = "none"
+        data.thin_pool = True
+        data.metadata_size = self.metadata_size.convert_to(MiB)
+        data.chunk_size = self.chunk_size.convert_to(KiB)
+        if self.profile:
+            data.profile = self.profile.name
+
 
 class LVMThinLogicalVolumeMixin(object):
     def __init__(self):
@@ -977,6 +1250,51 @@ class LVMThinLogicalVolumeMixin(object):
             less than one chunk per thin lv, so be it.
         """
         return self.vg.align(self.size, roundup=True)
+
+    @property
+    def vg_space_used(self):
+        return Size(0)    # the pool's size is already accounted for in the vg
+
+    def _set_size(self, size):
+        if not isinstance(size, Size):
+            raise ValueError("new size must of type Size")
+
+        size = self.vg.align(size)
+        size = self.vg.align(util.numeric_type(size))
+        super(LVMThinLogicalVolumeDevice, self)._set_size(size)
+
+    def _pre_create(self):
+        # skip LVMLogicalVolumeDevice's _pre_create() method as it checks for a
+        # free space in a VG which doesn't make sense for a ThinLV and causes a
+        # bug by limitting the ThinLV's size to VG free space which is nonsense
+        super(LVMLogicalVolumeDevice, self)._pre_create()  # pylint: disable=bad-super-call
+
+    def _create(self):
+        """ Create the device. """
+        log_method_call(self, self.name, status=self.status)
+        blockdev.lvm.thlvcreate(self.vg.name, self.pool.lvname, self.lvname,
+                                self.size)
+
+    def remove_hook(self, modparent=True):
+        if modparent:
+            self.pool._remove_log_vol(self)
+
+        # pylint: disable=bad-super-call
+        super(LVMLogicalVolumeDevice, self).remove_hook(modparent=modparent)
+
+    def add_hook(self, new=True):
+        # pylint: disable=bad-super-call
+        super(LVMLogicalVolumeDevice, self).add_hook(new=new)
+        if new:
+            return
+
+        if self not in self.pool.lvs:
+            self.pool._add_log_vol(self)
+
+    def populate_ksdata(self, data):
+        super(LVMThinLogicalVolumeDevice, self).populate_ksdata(data)
+        data.thin_volume = True
+        data.pool_name = self.pool.lvname
 
 
 class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin, LVMSnapshotMixin,
@@ -1061,27 +1379,36 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         self._check_parents()
         self._add_to_parents()
 
-    def _get_type_class(self):
+    def _get_type_classes(self):
+        ret = []
         if self.is_internal_lv:
-            return LVMInternalLogicalVolumeMixin
+            ret.append(LVMInternalLogicalVolumeMixin)
         elif self.is_snapshot_lv:
-            return LVMSnapshotMixin
+            ret.append(LVMSnapshotMixin)
         elif self.is_thin_pool:
-            return LVMThinPoolMixin
+            ret.append(LVMThinPoolMixin)
         elif self.is_thin_lv:
-            return LVMThinLogicalVolumeMixin
+            ret.append(LVMThinLogicalVolumeMixin)
         else:
-            return LVMLogicalVolumeBase
+            ret.append(LVMLogicalVolumeBase)
+
+        return ret
 
     def _try_specific_call(self, method, *args, **kwargs):
-        cls = self._get_type_class()
-        if hasattr(cls, method):
-            # found, call the type-specific method
-            return (True, getattr(cls, method)(*args, **kwargs))
-        else:
-            # not found, let the caller know
-            return (False, None)
+        clss = self._get_type_classes()
+        for cls in clss:
+            if hasattr(cls, method):
+                # found, call the type-specific method
+                try:
+                    ret = getattr(cls, method)(*args, **kwargs)
+                except NotTypeSpecific:
+                    continue
+                else:
+                    return (True, ret)
+        # not found, let the caller know
+        return (False, None)
 
+    # decorator
     def type_specific(meth):
         @wraps(meth)
         def decorated(self, *args, **kwargs):
@@ -1093,6 +1420,17 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
                 return meth(self, *args, **kwargs)
 
         return decorated
+
+    @type_specific
+    def __repr__(self):
+        s = DMDevice.__repr__(self)
+        s += ("  VG device = %(vgdev)r\n"
+              "  segment type = %(type)s percent = %(percent)s\n"
+              "  VG space used = %(vgspace)s" %
+              {"vgdev": self.vg, "percent": self.req_percent,
+               "type": self.seg_type,
+               "vgspace": self.vg_space_used})
+        return s
 
     @type_specific
     def _check_parents(self):
@@ -1117,7 +1455,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
     @type_specific
     def _set_size(self, size):
         if not isinstance(size, Size):
-            raise ValueError("new size must of type Size")
+            raise ValueError("new size must be of type Size")
 
         size = self.vg.align(size)
         log.debug("trying to set lv %s size to %s", self.name, size)
@@ -1142,7 +1480,6 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         max_format = self.format.max_size
         return min(max_lv, max_format) if max_format else max_lv
 
-
     @property
     @type_specific
     def vg_space_used(self):
@@ -1154,6 +1491,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
 
         return self.data_vg_space_used + self.metadata_vg_space_used + cache_size
 
+    @type_specific
     def _set_format(self, fmt):
         super(LVMLogicalVolumeDevice, self)._set_format(fmt)
         for snapshot in (s for s in self.snapshots if not s.exists):
@@ -1162,6 +1500,28 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
     def setup_parents(self, orig=False):
         # parent is a vg, which has no formatting (or device for that matter)
         Device.setup_parents(self, orig=orig)
+
+    @type_specific
+    def setup(self, orig=False):
+        return DMDevice.setup(self, orig)
+
+    @type_specific
+    def teardown(self, recursive=None):
+        return DMDevice.teardown(self, recursive)
+
+    @type_specific
+    def destroy(self):
+        return DMDevice.destroy(self)
+
+    @property
+    @type_specific
+    def growable(self):
+        return DMDevice.growable(self)
+
+    @property
+    @type_specific
+    def display_lv_name(self):
+        return self.lvname
 
     def _pre_setup(self, orig=False):
         # If the lvmetad socket exists and any PV is inactive before we call
@@ -1195,6 +1555,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
 
         return True
 
+    @type_specific
     def _setup(self, orig=False):
         """ Open, or set up, a device. """
         log_method_call(self, self.name, orig=orig, status=self.status,
@@ -1219,6 +1580,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
             else:
                 raise
 
+    @type_specific
     def _pre_create(self):
         super(LVMLogicalVolumeDevice, self)._pre_create()
 
@@ -1239,6 +1601,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
             log.warning(msg)
             self.size = can_use
 
+    @type_specific
     def _create(self):
         """ Create the device. """
         log_method_call(self, self.name, status=self.status)
@@ -1276,6 +1639,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
             blockdev.lvm.cache_create_cached_lv(self.vg.name, self._name, self.size, self.cache.size, self.cache.md_size,
                                                 mode, 0, util.dedup_list(slow_pvs + fast_pvs), fast_pvs)
 
+    @type_specific
     def _post_create(self):
         super()._post_create()
         # update the free space info of the PVs this LV could have taken space
@@ -1294,11 +1658,13 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         # set up the vg's pvs so lvm can remove the lv
         self.vg.setup_parents(orig=True)
 
+    @type_specific
     def _destroy(self):
         """ Destroy the device. """
         log_method_call(self, self.name, status=self.status)
         blockdev.lvm.lvremove(self.vg.name, self._name)
 
+    @type_specific
     def resize(self):
         log_method_call(self, self.name, status=self.status)
 
@@ -1323,12 +1689,26 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
                 not non_thin_snapshots)
 
     @property
+    @type_specific
     def direct(self):
         """ Is this device directly accessible? """
         # an LV can contain a direct filesystem if it is a leaf device or if
         # its only dependent devices are snapshots
         return super(LVMLogicalVolumeDevice, self).isleaf
 
+    @type_specific
+    def _get_parted_device_path(self):
+        return DMDevice._get_parted_device_path(self)
+
+    @type_specific
+    def depends_on(self, dep):
+        return DMDevice.depends_on(self, dep)
+
+    @type_specific
+    def read_current_size(self):
+        return DMDevice.read_current_size(self)
+
+    @type_specific
     def dracut_setup_args(self):
         # Note no map_name usage here, this is a lvm cmdline name, which
         # is different (ofcourse)
@@ -1353,12 +1733,14 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
             return -1
         return 0
 
+    @type_specific
     def remove_hook(self, modparent=True):
         if modparent:
             self.vg._remove_log_vol(self)
 
         super(LVMLogicalVolumeDevice, self).remove_hook(modparent=modparent)
 
+    @type_specific
     def add_hook(self, new=True):
         super(LVMLogicalVolumeDevice, self).add_hook(new=new)
         if new:
@@ -1367,6 +1749,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         if self not in self.vg.lvs:
             self.vg._add_log_vol(self)
 
+    @type_specific
     def populate_ksdata(self, data):
         super(LVMLogicalVolumeDevice, self).populate_ksdata(data)
         data.vgname = self.vg.name
@@ -1439,113 +1822,6 @@ class LVMInternalLogicalVolumeDevice(LVMLogicalVolumeDevice):
     attr_letters = abc.abstractproperty(doc="letters representing the type of the internal LV in the attrs")
     name_suffix = abc.abstractproperty(doc="pattern matching typical/default suffices for internal LVs of this type")
     takes_extra_space = abc.abstractproperty(doc="whether LVs of this type take space in a VG or are part of their parent LVs")
-
-    @classmethod
-    def is_name_valid(cls, name):
-        # override checks for normal LVs, internal LVs typically have names that
-        # are forbidden for normal LVs
-        return True
-
-    def _check_parents(self):
-        # an internal LV should have no parents
-        if self._parents:
-            raise ValueError("an internal LV should have no parents")
-
-    def _add_to_parents(self):
-        # nothing to do here, an internal LV has no parents (in the DeviceTree's
-        # meaning of 'parents')
-        pass
-
-    @property
-    def vg(self):
-        return self._vg
-
-    @vg.setter
-    def vg(self, vg):
-        # pylint: disable=arguments-differ
-        self._vg = vg
-
-    # internal LVs follow different rules limitting size
-    def _set_size(self, size):
-        if not isinstance(size, Size):
-            raise ValueError("new size must of type Size")
-
-        if not self.takes_extra_space:
-            if size <= self.parent_lv.size:
-                self._size = size
-            else:
-                raise ValueError("Internal LV cannot be bigger than its parent LV")
-        else:
-            # same rules apply as for any other LV
-            super(LVMInternalLogicalVolumeDevice, self)._set_size(size)
-
-    @property
-    def max_size(self):
-        # no format, so maximum size is only limitted by either the parent LV or the VG
-        if not self.takes_extra_space:
-            return self._parent_lv.max_size
-        else:
-            return self.size + self.vg.free_space
-
-    def __repr__(self):
-        s = "%s:\n" % self.__class__.__name__
-        s += ("  name = %s, status = %s exists = %s\n" % (self.lvname, self.status, self.exists))
-        s += ("  uuid = %s, size = %s\n" % (self.uuid, self.size))
-        s += ("  parent LV = %r\n" % self.parent_lv)
-        s += ("  VG device = %(vgdev)r\n"
-              "  segment type = %(type)s percent = %(percent)s\n"
-              "  VG space used = %(vgspace)s" %
-              {"vgdev": self.vg, "percent": self.req_percent,
-               "type": self.seg_type,
-               "vgspace": self.vg_space_used})
-        return s
-
-    # generally changes should be done on the parent LV (exceptions should
-    # override these)
-    def setup(self, orig=False):
-        raise errors.DeviceError("An internal LV cannot be set up separately")
-
-    def teardown(self, recursive=None):
-        raise errors.DeviceError("An internal LV cannot be torn down separately")
-
-    def destroy(self):
-        raise errors.DeviceError("An internal LV cannot be destroyed separately")
-
-    def resize(self):
-        raise errors.DeviceError("An internal LV cannot be resized")
-
-    @property
-    def growable(self):
-        return False
-
-    @property
-    def display_lvname(self):
-        """Name of the internal LV as displayed by the lvm utilities"""
-        return "[%s]" % self.lvname
-
-    # these two methods are not needed right now, because they are only called
-    # when devices are added/removed to/from the DeviceTree, but they may come
-    # handy in the future
-    def add_hook(self, new=True):
-        # skip LVMLogicalVolumeDevice in the class hierarchy -- we don't want to
-        # add an internal LV to the VG (it's only referenced by the parent LV)
-        # pylint: disable=bad-super-call
-        super(LVMLogicalVolumeDevice, self).add_hook(new=new)
-        self._parent_lv.add_internal_lv(self)
-
-    def remove_hook(self, modparent=True):
-        if modparent:
-            self._parent_lv.remove_internal_lv(self)
-
-        # skip LVMLogicalVolumeDevice in the class hierarchy -- we cannot remove
-        # an internal LV from the VG (it's only referenced by the parent LV)
-        # pylint: disable=bad-super-call
-        super(LVMLogicalVolumeDevice, self).remove_hook(modparent=modparent)
-
-    @property
-    def direct(self):
-        # internal LVs are not directly accessible
-        return False
 
 
 class LVMDataLogicalVolumeDevice(LVMInternalLogicalVolumeDevice):
@@ -1654,85 +1930,12 @@ class LVMSnapShotBase(object):
     """
     _type = "lvmsnapshotbase"
 
-    def _update_format_from_origin(self):
-        """ Update the snapshot's format to reflect the origin's.
-
-            .. note::
-                This should only be called for non-existent snapshot devices.
-                Once a snapshot exists its format is distinct from that of its
-                origin.
-
-        """
-        fmt = copy.deepcopy(self.origin.format)
-        fmt.exists = False
-        if hasattr(fmt, "mountpoint"):
-            fmt.mountpoint = ""
-            fmt._chrooted_mountpoint = None
-            fmt.device = self.path  # pylint: disable=no-member
-
-        super(LVMSnapShotBase, self)._set_format(fmt)
-
-    def _set_format(self, fmt):
-        # If a snapshot exists it can have a format that is distinct from its
-        # origin's. If it does not exist its format must be a copy of its
-        # origin's.
-        if self.exists:  # pylint: disable=no-member
-            super(LVMSnapShotBase, self)._set_format(fmt)
-        else:
-            log.info("copying %s origin's format", self.name)  # pylint: disable=no-member
-            self._update_format_from_origin()
-
-    @abc.abstractmethod
-    def _create(self):
-        """ Create the device. """
-        raise NotImplementedError()
-
 
 class LVMSnapShotDevice(LVMSnapShotBase, LVMLogicalVolumeDevice):
 
     """ An LVM snapshot """
     _type = "lvmsnapshot"
     _format_immutable = True
-
-    def setup(self, orig=False):
-        pass
-
-    def teardown(self, recursive=False):
-        pass
-
-    def _create(self):
-        """ Create the device. """
-        log_method_call(self, self.name, status=self.status)
-        blockdev.lvm.lvsnapshotcreate(self.vg.name, self.origin.lvname, self._name, self.size)
-
-    def _destroy(self):
-        """ Destroy the device. """
-        log_method_call(self, self.name, status=self.status)
-        # old-style snapshots' status is tied to the origin's so we never
-        # explicitly activate or deactivate them and we have to tell lvremove
-        # that it is okay to remove the active snapshot
-        blockdev.lvm.lvremove(self.vg.name, self._name, force=True)
-
-    def _get_parted_device_path(self):
-        return "%s-cow" % self.path
-
-    def depends_on(self, dep):
-        # pylint: disable=bad-super-call
-        return (self.origin == dep or
-                super(LVMSnapShotBase, self).depends_on(dep))
-
-    def read_current_size(self):
-        log_method_call(self, exists=self.exists, path=self.path,
-                        sysfs_path=self.sysfs_path)
-        size = Size(0)
-        if self.exists and os.path.isdir(self.sysfs_path):
-            cow_sysfs_path = util.get_cow_sysfs_path(self.path, self.sysfs_path)
-
-            if os.path.exists(cow_sysfs_path) and os.path.isdir(cow_sysfs_path):
-                blocks = int(util.get_sysfs_attr(cow_sysfs_path, "size"))
-                size = Size(blocks * LINUX_SECTOR_SIZE)
-
-        return size
 
 
 class LVMThinPoolDevice(LVMLogicalVolumeDevice):
@@ -1741,123 +1944,12 @@ class LVMThinPoolDevice(LVMLogicalVolumeDevice):
     _type = "lvmthinpool"
     _resizable = False
 
-    def _add_log_vol(self, lv):
-        """ Add an LV to this pool. """
-        if lv in self._lvs:
-            raise ValueError("lv is already part of this vg")
-
-        # TODO: add some checking to prevent overcommit for preexisting
-        self.vg._add_log_vol(lv)
-        log.debug("Adding %s/%s to %s", lv.name, lv.size, self.name)
-        self._lvs.append(lv)
-
-    def _remove_log_vol(self, lv):
-        """ Remove an LV from this pool. """
-        if lv not in self._lvs:
-            raise ValueError("specified lv is not part of this vg")
-
-        self._lvs.remove(lv)
-        self.vg._remove_log_vol(lv)
-
-    @property
-    def lvs(self):
-        """ A list of this pool's LVs """
-        return self._lvs[:]     # we don't want folks changing our list
-
-    @property
-    def vg_space_used(self):
-        space = super(LVMThinPoolDevice, self).vg_space_used
-        space += Size(blockdev.lvm.get_thpool_padding(space, self.vg.pe_size))
-        return space
-
-    def _create(self):
-        """ Create the device. """
-        log_method_call(self, self.name, status=self.status)
-        if self.profile:
-            profile_name = self.profile.name
-        else:
-            profile_name = None
-        # TODO: chunk size, data/metadata split --> profile
-        # TODO: allow for specification of PVs
-        blockdev.lvm.thpoolcreate(self.vg.name, self.lvname, self.size,
-                                  md_size=self.metadata_size,
-                                  chunk_size=self.chunk_size,
-                                  profile=profile_name)
-
-    def dracut_setup_args(self):
-        return set()
-
-    @property
-    def direct(self):
-        """ Is this device directly accessible? """
-        return False
-
-    def populate_ksdata(self, data):
-        super(LVMThinPoolDevice, self).populate_ksdata(data)
-        data.mountpoint = "none"
-        data.thin_pool = True
-        data.metadata_size = self.metadata_size.convert_to(MiB)
-        data.chunk_size = self.chunk_size.convert_to(KiB)
-        if self.profile:
-            data.profile = self.profile.name
-
 
 class LVMThinLogicalVolumeDevice(LVMLogicalVolumeDevice):
 
     """ An LVM Thin Logical Volume """
     _type = "lvmthinlv"
     _container_class = LVMThinPoolDevice
-
-    @property
-    def vg(self):
-        return self.pool.vg
-
-    @property
-    def vg_space_used(self):
-        return Size(0)    # the pool's size is already accounted for in the vg
-
-    def _set_size(self, size):
-        if not isinstance(size, Size):
-            raise ValueError("new size must of type Size")
-
-        size = self.vg.align(size)
-        size = self.vg.align(util.numeric_type(size))
-        super(LVMThinLogicalVolumeDevice, self)._set_size(size)
-
-    size = property(StorageDevice._get_size, _set_size)
-
-    def _pre_create(self):
-        # skip LVMLogicalVolumeDevice's _pre_create() method as it checks for a
-        # free space in a VG which doesn't make sense for a ThinLV and causes a
-        # bug by limitting the ThinLV's size to VG free space which is nonsense
-        super(LVMLogicalVolumeDevice, self)._pre_create()  # pylint: disable=bad-super-call
-
-    def _create(self):
-        """ Create the device. """
-        log_method_call(self, self.name, status=self.status)
-        blockdev.lvm.thlvcreate(self.vg.name, self.pool.lvname, self.lvname,
-                                self.size)
-
-    def remove_hook(self, modparent=True):
-        if modparent:
-            self.pool._remove_log_vol(self)
-
-        # pylint: disable=bad-super-call
-        super(LVMLogicalVolumeDevice, self).remove_hook(modparent=modparent)
-
-    def add_hook(self, new=True):
-        # pylint: disable=bad-super-call
-        super(LVMLogicalVolumeDevice, self).add_hook(new=new)
-        if new:
-            return
-
-        if self not in self.pool.lvs:
-            self.pool._add_log_vol(self)
-
-    def populate_ksdata(self, data):
-        super(LVMThinLogicalVolumeDevice, self).populate_ksdata(data)
-        data.thin_volume = True
-        data.pool_name = self.pool.lvname
 
 
 class LVMThinSnapShotDevice(LVMSnapShotBase, LVMThinLogicalVolumeDevice):
@@ -1866,34 +1958,6 @@ class LVMThinSnapShotDevice(LVMSnapShotBase, LVMThinLogicalVolumeDevice):
     _type = "lvmthinsnapshot"
     _resizable = False
     _format_immutable = True
-
-    def _setup(self, orig=False):
-        """ Open, or set up, a device. """
-        log_method_call(self, self.name, orig=orig, status=self.status,
-                        controllable=self.controllable)
-        blockdev.lvm.lvactivate(self.vg.name, self._name, ignore_skip=True)
-
-    def _create(self):
-        """ Create the device. """
-        log_method_call(self, self.name, status=self.status)
-        pool_name = None
-        if not isinstance(self.origin, LVMThinLogicalVolumeDevice):
-            # if the origin is not a thin volume we need to tell lvm which pool
-            # to use
-            pool_name = self.pool.lvname
-
-        blockdev.lvm.thsnapshotcreate(self.vg.name, self.origin.lvname, self._name,
-                                      pool_name=pool_name)
-
-    def _post_create(self):
-        super(LVMThinSnapShotDevice, self)._post_create()
-        # A snapshot's format exists as soon as the snapshot has been created.
-        self.format.exists = True
-
-    def depends_on(self, dep):
-        # once a thin snapshot exists it no longer depends on its origin
-        return ((self.origin == dep and not self.exists) or
-                super(LVMThinSnapShotDevice, self).depends_on(dep))
 
 
 class LVMCache(Cache):
