@@ -30,6 +30,7 @@ import time
 import itertools
 from collections import namedtuple
 from functools import wraps
+from enum import Enum
 
 import gi
 gi.require_version("BlockDev", "1.0")
@@ -58,23 +59,6 @@ from .raid import RaidDevice
 from .dm import DMDevice
 from .md import MDRaidArrayDevice
 from .cache import Cache, CacheStats, CacheRequest
-
-_INTERNAL_LV_CLASSES = []
-
-
-def get_internal_lv_class(lv_attr):
-    if lv_attr[0] == "C":
-        # cache pools and internal data LV of cache pools need a more complicated check
-        if lv_attr[6] == "C":
-            # target type == cache -> cache pool
-            return LVMCachePoolLogicalVolumeDevice
-        else:
-            return LVMDataLogicalVolumeDevice
-    for cls in _INTERNAL_LV_CLASSES:
-        if lv_attr[0] in cls.attr_letters:
-            return cls
-
-    return None
 
 
 class LVPVSpec(object):
@@ -837,9 +821,44 @@ class LVMLogicalVolumeBase(DMDevice, RaidDevice):
 
         return self._cache
 
+
+class LVMInternalLVtype(Enum):
+    data = 1
+    meta = 2
+    log = 3
+    image = 4
+    origin = 5
+    cache_pool = 6
+    unknown = 99
+
+    @classmethod
+    def get_type(cls, lv_attr, lv_name):
+        attr_letters = {cls.data: ("T", "C"),
+                        cls.meta: ("e",),
+                        cls.log: ("l", "L"),
+                        cls.image: ("i",),
+                        cls.origin: ("o",),
+                        cls.cache_pool: ("C",)}
+
+        if lv_attr[0] == "C":
+            # cache pools and internal data LV of cache pools need a more complicated check
+            if lv_attr[6] == "C":
+                # target type == cache -> cache pool
+                return cls.cache_pool
+            else:
+                return cls.data
+
+        for lv_type, letters in attr_letters.items():
+            if lv_attr[0] in letters:
+                return lv_type
+
+        return cls.unknown
+
+
 class LVMInternalLogicalVolumeMixin(object):
-    def __init__(self, parent_lv): # TODO: pass and store type (enum?)
+    def __init__(self, parent_lv, lv_type):
         self._parent_lv = parent_lv
+        self._lv_type = lv_type
         if parent_lv:
             self._parent_lv.add_internal_lv(self)
             self._vg = self._parent_lv.vg
@@ -862,12 +881,57 @@ class LVMInternalLogicalVolumeMixin(object):
         if self._parent_lv:
             self._parent_lv.add_internal_lv(self)
 
+    @property
+    @util.requires_property("is_internal_lv")
+    def takes_extra_space(self):
+        return self._lv_type in (LVMInternalLVtype.meta,
+                                 LVMInternalLVtype.log,
+                                 LVMInternalLVtype.cache_pool)
+
+    @property
+    @util.requires_property("is_internal_lv")
+    def name_suffix(self):
+        suffixes = {LVMInternalLVtype.data:       r"_[tc]data",
+                    LVMInternalLVtype.meta:       r"_[trc]meta(_[0-9]+)?",
+                    LVMInternalLVtype.log:        r"_mlog",
+                    LVMInternalLVtype.image:      r"_[rm]image(_[0-9]+)?",
+                    LVMInternalLVtype.origin:     r"_c?orig",
+                    LVMInternalLVtype.cache_pool: r"_cache(_?pool)?"}
+        return suffixes.get(self._lv_type)
+
+    @property
+    def _readonly(self):
+        return True
+
+    @_readonly.setter
+    def _readonly(self, value):
+        raise ValueError("Cannot make an internal LV read-write")
+
+    @property
+    def type(self):
+        return "lvminternallv"
+
+    @property
+    def resizable(self):
+        if DMDevice.resizable(self) and self._lv_type is LVMInternalLVtype.meta:
+            if self._parent_lv:
+                return isinstance(self._parent_lv, LVMThinPoolDevice)
+            else:
+                # hard to say at this point, just use the name
+                return not re.search(r'_[rc]meta', self.lvname)
+        else:
+            return False
+
+    def resize(self):
+        if ((self._parent_lv and not isinstance(self._parent_lv, LVMThinPoolDevice)) or
+                re.search(r'_[rc]meta', self.lvname)):
+            raise errors.DeviceError("RAID and cache pool metadata LVs cannot be resized directly")
+
+        # skip the generic LVMInternalLogicalVolumeDevice class and call the
+        # resize() method of the LVMLogicalVolumeDevice
+        raise NotTypeSpecific()
+
     # TODO: SOLVE THIS!
-    # @property
-    # @util.requires_property("is_internal_lv")
-    # def takes_extra_space(self):
-    #     ?????
-    #
     # @classmethod
     # def is_name_valid(cls, name):
     #     # override checks for normal LVs, internal LVs typically have names that
@@ -1307,7 +1371,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
     def __init__(self, name, parents=None, size=None, uuid=None, seg_type=None,
                  fmt=None, exists=False, sysfs_path='', grow=None, maxsize=None,
                  percent=None, cache_request=None, pvs=None,
-                 parent_lv=None, origin=None, vorigin=False,
+                 parent_lv=None, int_type=None, origin=None, vorigin=False,
                  metadata_size=None, chunk_size=None, profile=None):
         """
             :param name: the device name (generally a device node's basename)
@@ -1344,6 +1408,8 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
 
             :keyword parent_lv: parent LV of this internal LV
             :type parent_lv: :class:`LVMLogicalVolumeDevice`
+            :keyword int_type: type of this internal LV
+            :type int_type: :class:`LVMInternalLVtype`
 
             For snapshots only:
 
@@ -1369,7 +1435,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         LVMLogicalVolumeBase.__init__(self, name, parents, size, uuid, seg_type,
                                       fmt, exists, sysfs_path, grow, maxsize,
                                       percent, cache_request, pvs)
-        LVMInternalLogicalVolumeMixin.__init__(self, parent_lv)
+        LVMInternalLogicalVolumeMixin.__init__(self, parent_lv, int_type)
         LVMSnapshotMixin.__init__(self, origin, vorigin)
         LVMThinPoolMixin.__init__(self, metadata_size, chunk_size, profile)
         LVMThinLogicalVolumeMixin.__init__(self)
@@ -1707,6 +1773,36 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         # its only dependent devices are snapshots
         return super(LVMLogicalVolumeDevice, self).isleaf
 
+    @property
+    @type_specific
+    def _readonly(self):
+        return self._readonly or any(p.readonly for p in self.parents)
+
+    @_readonly.setter
+    @type_specific
+    def _readonly(self, value):
+        self._readonly = value
+
+    @property
+    @type_specific
+    def type(self):
+        return self._type
+
+    @property
+    @type_specific
+    def container_class(self):
+        return LVMVolumeGroupDevice
+
+    @property
+    @type_specific
+    def resizable(self):
+        return DMDevice.resizable(self)
+
+    @property
+    @type_specific
+    def format_immutable(self):
+        return DMDevice.format_immutable(self)
+
     @type_specific
     def _get_parted_device_path(self):
         return DMDevice._get_parted_device_path(self)
@@ -1807,118 +1903,6 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
     def attach_cache(self, cache_pool_lv):
         blockdev.lvm.cache_attach(self.vg.name, self.lvname, cache_pool_lv.lvname)
         self._cache = LVMCache(self, size=cache_pool_lv.size, exists=True)
-
-
-@add_metaclass(SynchronizedABCMeta)
-class LVMInternalLogicalVolumeDevice(LVMLogicalVolumeDevice):
-
-    """Abstract base class for internal LVs
-
-    A common class for all classes representing internal Logical Volumes like
-    data and metadata parts of pools, RAID images, etc.
-
-    Internal LVs are only referenced by their "parent" LVs (normal LVs they
-    back) as all queries and manipulations with them should be done via their
-    parent LVs.
-
-    """
-
-    _type = "lvminternallv"
-
-    # generally changes should be done on the parent LV (exceptions should
-    # override these)
-    _resizable = False
-    _readonly = True
-
-    attr_letters = abc.abstractproperty(doc="letters representing the type of the internal LV in the attrs")
-    name_suffix = abc.abstractproperty(doc="pattern matching typical/default suffices for internal LVs of this type")
-    takes_extra_space = abc.abstractproperty(doc="whether LVs of this type take space in a VG or are part of their parent LVs")
-
-
-class LVMDataLogicalVolumeDevice(LVMInternalLogicalVolumeDevice):
-
-    """Internal data LV (used by thin/cache pools)"""
-
-    attr_letters = ["T", "C"]
-    name_suffix = r"_[tc]data"
-    takes_extra_space = False
-_INTERNAL_LV_CLASSES.append(LVMDataLogicalVolumeDevice)
-
-
-class LVMMetadataLogicalVolumeDevice(LVMInternalLogicalVolumeDevice):
-
-    """Internal metadata LV (used by thin/cache pools, RAIDs, etc.)"""
-
-    # thin pool metadata LVs can be resized directly
-    _resizable = True
-
-    attr_letters = ["e"]
-    # RAIDs can have multiple (numbered) metadata LVs
-    name_suffix = r"_[trc]meta(_[0-9]+)?"
-    takes_extra_space = True
-
-    # (only) thin pool metadata LVs can be resized directly
-    @property
-    def resizable(self):
-        if self._parent_lv:
-            return isinstance(self._parent_lv, LVMThinPoolDevice)
-        else:
-            # hard to say at this point, just use the name
-            return not re.search(r'_[rc]meta', self.lvname)
-
-    # (only) thin pool metadata LVs can be resized directly
-    def resize(self):
-        if ((self._parent_lv and not isinstance(self._parent_lv, LVMThinPoolDevice)) or
-                re.search(r'_[rc]meta', self.lvname)):
-            raise errors.DeviceError("RAID and cache pool metadata LVs cannot be resized directly")
-
-        # skip the generic LVMInternalLogicalVolumeDevice class and call the
-        # resize() method of the LVMLogicalVolumeDevice
-        # pylint: disable=bad-super-call
-        super(LVMInternalLogicalVolumeDevice, self).resize()
-
-_INTERNAL_LV_CLASSES.append(LVMMetadataLogicalVolumeDevice)
-
-
-class LVMLogLogicalVolumeDevice(LVMInternalLogicalVolumeDevice):
-
-    """Internal log LV (used by mirrored LVs)"""
-
-    attr_letters = ["l", "L"]
-    name_suffix = "_mlog"
-    takes_extra_space = True
-_INTERNAL_LV_CLASSES.append(LVMLogLogicalVolumeDevice)
-
-
-class LVMImageLogicalVolumeDevice(LVMInternalLogicalVolumeDevice):
-
-    """Internal image LV (used by mirror/RAID LVs)"""
-
-    attr_letters = ["i"]
-    # RAIDs have multiple (numbered) image LVs
-    name_suffix = r"_[rm]image(_[0-9]+)?"
-    takes_extra_space = False
-_INTERNAL_LV_CLASSES.append(LVMImageLogicalVolumeDevice)
-
-
-class LVMOriginLogicalVolumeDevice(LVMInternalLogicalVolumeDevice):
-
-    """Internal origin LV (e.g. the raw/uncached part of a cached LV)"""
-
-    attr_letters = ["o"]
-    name_suffix = r"_c?orig"
-    takes_extra_space = False
-_INTERNAL_LV_CLASSES.append(LVMOriginLogicalVolumeDevice)
-
-
-class LVMCachePoolLogicalVolumeDevice(LVMInternalLogicalVolumeDevice):
-
-    """Internal cache pool logical volume"""
-
-    attr_letters = ["C"]
-    name_suffix = r"_cache(_?pool)?"
-    takes_extra_space = True
-_INTERNAL_LV_CLASSES.append(LVMCachePoolLogicalVolumeDevice)
 
 
 @add_metaclass(SynchronizedABCMeta)
