@@ -557,7 +557,6 @@ class LVMLogicalVolumeBase(DMDevice, RaidDevice):
 
     _type = "lvmlv"
     _packages = ["lvm2"]
-    _container_class = LVMVolumeGroupDevice
     _external_dependencies = [availability.BLOCKDEV_LVM_PLUGIN]
 
     def __init__(self, name, parents=None, size=None, uuid=None, seg_type=None,
@@ -1064,6 +1063,24 @@ class LVMSnapshotMixin(object):
     def is_snapshot_lv(self):
         return bool(self.origin or self.vorigin)
 
+    @property
+    def type(self):
+        if self.is_thin_lv:
+            return "lvmthinsnapshot"
+        else:
+            return "lvmsnapshot"
+
+    @property
+    def resizable(self):
+        if self.is_thin_lv:
+            return False
+        else:
+            raise NotTypeSpecific()
+
+    @property
+    def format_immutable(self):
+        return False
+
     # decorator
     def old_snapshot_specific(meth):
         """Decorator for methods that are specific only to old snapshots"""
@@ -1216,6 +1233,14 @@ class LVMThinPoolMixin(object):
         return self.seg_type == "thin-pool"
 
     @property
+    def type(self):
+        return "lvmthinpool"
+
+    @property
+    def resizable(self):
+        return False
+
+    @property
     @util.requires_property("is_thin_pool")
     def used_space(self):
         return sum((l.pool_space_used for l in self.lvs), Size(0))
@@ -1298,6 +1323,10 @@ class LVMThinLogicalVolumeMixin(object):
     @property
     def is_thin_lv(self):
         return self.seg_type == "thin"
+
+    @property
+    def container_class(self):
+        return LVMThinPoolDevice
 
     @property
     @util.requires_property("is_thin_lv")
@@ -1514,14 +1543,14 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         """Check that this device has parents as expected"""
         if isinstance(self.parents, (list, ParentList)):
             if len(self.parents) != 1:
-                raise ValueError("constructor requires a single %s instance" % self._container_class.__name__)
+                raise ValueError("constructor requires a single %s instance" % self.container_class.__name__)
 
             container = self.parents[0]
         else:
             container = self.parents
 
         if not isinstance(container, self._container_class):
-            raise ValueError("constructor requires a %s instance" % self._container_class.__name__)
+            raise ValueError("constructor requires a %s instance" % self.container_class.__name__)
 
     @type_specific
     def _add_to_parents(self):
@@ -1903,56 +1932,6 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
     def attach_cache(self, cache_pool_lv):
         blockdev.lvm.cache_attach(self.vg.name, self.lvname, cache_pool_lv.lvname)
         self._cache = LVMCache(self, size=cache_pool_lv.size, exists=True)
-
-
-@add_metaclass(SynchronizedABCMeta)
-class LVMSnapShotBase(object):
-
-    """ Abstract base class for lvm snapshots
-
-        This class is intended to be used with multiple inheritance in addition
-        to some subclass of :class:`~.StorageDevice`.
-
-        Snapshots do not have their origin/source volume as parent. They are
-        like other LVs except that they have an origin attribute and are in that
-        instance's snapshots list.
-
-        Normal/old snapshots must be removed with their origin, while thin
-        snapshots can remain after their origin is removed.
-
-        It is also impossible to set the format for a non-existent snapshot
-        explicitly as it always has the same format as its origin.
-    """
-    _type = "lvmsnapshotbase"
-
-
-class LVMSnapShotDevice(LVMSnapShotBase, LVMLogicalVolumeDevice):
-
-    """ An LVM snapshot """
-    _type = "lvmsnapshot"
-    _format_immutable = True
-
-
-class LVMThinPoolDevice(LVMLogicalVolumeDevice):
-
-    """ An LVM Thin Pool """
-    _type = "lvmthinpool"
-    _resizable = False
-
-
-class LVMThinLogicalVolumeDevice(LVMLogicalVolumeDevice):
-
-    """ An LVM Thin Logical Volume """
-    _type = "lvmthinlv"
-    _container_class = LVMThinPoolDevice
-
-
-class LVMThinSnapShotDevice(LVMSnapShotBase, LVMThinLogicalVolumeDevice):
-
-    """ An LVM Thin Snapshot """
-    _type = "lvmthinsnapshot"
-    _resizable = False
-    _format_immutable = True
 
 
 class LVMCache(Cache):
