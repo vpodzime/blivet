@@ -1889,25 +1889,6 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         # is different (ofcourse)
         return set(["rd.lvm.lv=%s/%s" % (self.vg.name, self._name)])
 
-    def check_size(self):
-        """ Check to make sure the size of the device is allowed by the
-            format used.
-
-            Returns:
-            0  - ok
-            1  - Too large
-            -1 - Too small
-        """
-        if self.format.max_size and self.size > self.format.max_size:
-            return 1
-        elif (self.format.min_size and
-              (not self.req_grow and
-               self.size < self.format.min_size) or
-              (self.req_grow and self.req_max_size and
-               self.req_max_size < self.format.min_size)):
-            return -1
-        return 0
-
     @type_specific
     def remove_hook(self, modparent=True):
         if modparent:
@@ -1953,6 +1934,8 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         return True
 
     def attach_cache(self, cache_pool_lv):
+        if self.is_thin_lv or self.is_snapshot or self.is_internal_lv:
+            raise errors.DeviceError("Cannot attach a cache pool to the '%s' LV" % self.name)
         blockdev.lvm.cache_attach(self.vg.name, self.lvname, cache_pool_lv.lvname)
         self._cache = LVMCache(self, size=cache_pool_lv.size, exists=True)
 
