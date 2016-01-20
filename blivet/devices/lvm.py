@@ -1394,14 +1394,25 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
 
         return ret
 
-    def _try_specific_call(self, method, *args, **kwargs):
+    def _try_specific_call(self, name, *args, **kwargs):
         clss = self._get_type_classes()
         for cls in clss:
-            if hasattr(cls, method):
-                # found, call the type-specific method
+            if hasattr(cls, name):
                 try:
-                    ret = getattr(cls, method)(*args, **kwargs)
+                    # found, check if it is a method or property
+                    if isinstance(vars(cls)[name], property):
+                        if len(args) == 0 and len(kwargs.keys()) == 0:
+                            # no *args nor **kwargs -> call the getter
+                            ret = getattr(cls, name).__get__(self)
+                        else:
+                            # some args -> call the setter
+                            ret = getattr(cls, name).__set__(self, *args, **kwargs)
+                    else:
+                        # or just call the method with all the args
+                        ret = getattr(cls, name)(self, *args, **kwargs)
                 except NotTypeSpecific:
+                    # no type-specific steps required for this class, just
+                    # continue with another one
                     continue
                 else:
                     return (True, ret)
