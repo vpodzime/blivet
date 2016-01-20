@@ -947,13 +947,13 @@ class LVMInternalLogicalVolumeMixin(object):
         return self._parent_lv
 
     @parent_lv.setter
-    @util.requires_property("is_internal_lv")
     def parent_lv(self, parent_lv):
         if self._parent_lv:
             self._parent_lv.remove_internal_lv(self)
         self._parent_lv = parent_lv
         if self._parent_lv:
             self._parent_lv.add_internal_lv(self)
+            self._vg = self._parent_lv.vg
 
     @property
     @util.requires_property("is_internal_lv")
@@ -1406,6 +1406,10 @@ class LVMThinLogicalVolumeMixin(object):
     @property
     def is_thin_lv(self):
         return self.seg_type == "thin"
+
+    @property
+    def type(self):
+        return "lvmthinlv"
 
     @property
     def container_type(self):
