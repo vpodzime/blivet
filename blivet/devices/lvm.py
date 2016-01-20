@@ -656,7 +656,14 @@ class LVMLogicalVolumeBase(DMDevice, RaidDevice):
 
     @property
     def is_raid_lv(self):
-        return self.seg_type != "linear" and self._raid_level.name != "linear"
+        seg_type = self.seg_type
+        if self.seg_type == "cache":
+            # for a cached LV we are interested in the segment type of its
+            # origin LV (the original non-cached LV)
+            for lv in self._internal_lvs:
+                if lv.int_lv_type == LVMInternalLVtype.origin:
+                    seg_type = lv.seg_type
+        return seg_type in itertools.chain.from_iterable([level.names for level in lvm.raid_levels])
 
     @property
     def _num_raid_pvs(self):
