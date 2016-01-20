@@ -777,6 +777,25 @@ class LVMLogicalVolumeBase(DMDevice, RaidDevice):
         else:
             return super()._get_name()
 
+    def check_size(self):
+        """ Check to make sure the size of the device is allowed by the
+            format used.
+
+            Returns:
+            0  - ok
+            1  - Too large
+            -1 - Too small
+        """
+        if self.format.max_size and self.size > self.format.max_size:
+            return 1
+        elif (self.format.min_size and
+              (not self.req_grow and
+               self.size < self.format.min_size) or
+              (self.req_grow and self.req_max_size and
+               self.req_max_size < self.format.min_size)):
+            return -1
+        return 0
+
     def _pre_setup(self, orig=False):
         # If the lvmetad socket exists and any PV is inactive before we call
         # setup_parents (via _pre_setup, below), we should wait for auto-
