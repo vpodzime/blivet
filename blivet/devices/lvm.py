@@ -1005,11 +1005,11 @@ class LVMInternalLogicalVolumeMixin(object):
         return suffixes.get(self._lv_type)
 
     @property
-    def _readonly(self):
+    def readonly(self):
         return True
 
-    @_readonly.setter
-    def _readonly(self, value):
+    @readonly.setter
+    def readonly(self, value):
         raise ValueError("Cannot make an internal LV read-write")
 
     @property
@@ -1576,13 +1576,15 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
             # parent<->child relation like other devices
             parents = None
 
-        LVMLogicalVolumeBase.__init__(self, name, parents, size, uuid, seg_type,
-                                      fmt, exists, sysfs_path, grow, maxsize,
-                                      percent, cache_request, pvs)
         LVMInternalLogicalVolumeMixin.__init__(self, parent_lv, int_type)
         LVMSnapshotMixin.__init__(self, origin, vorigin)
         LVMThinPoolMixin.__init__(self, metadata_size, chunk_size, profile)
         LVMThinLogicalVolumeMixin.__init__(self)
+        LVMLogicalVolumeBase.__init__(self, name, parents, size, uuid, seg_type,
+                                      fmt, exists, sysfs_path, grow, maxsize,
+                                      percent, cache_request, pvs)
+
+        # TODO: call checks here!
 
         # check that we got parents as expected and add this device to them now
         # that it is fully-initialized
@@ -1736,6 +1738,11 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
 
     @property
     @type_specific
+    def readonly(self):
+        return DMDevice.readonly(self)
+
+    @property
+    @type_specific
     def display_lv_name(self):
         return self.lvname
 
@@ -1847,16 +1854,6 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         # an LV can contain a direct filesystem if it is a leaf device or if
         # its only dependent devices are snapshots
         return super(LVMLogicalVolumeBase, self).isleaf
-
-    @property
-    @type_specific
-    def _readonly(self):
-        return self._readonly or any(p.readonly for p in self.parents)
-
-    @_readonly.setter
-    @type_specific
-    def _readonly(self, value):
-        self._readonly = value
 
     @property
     @type_specific

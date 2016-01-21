@@ -27,7 +27,7 @@ from gi.repository import BlockDev as blockdev
 
 from ... import udev
 from ...devicelibs import lvm
-from ...devices import LVMVolumeGroupDevice, LVMLogicalVolumeDevice, LVMInternalLVtype
+from ...devices.lvm import LVMVolumeGroupDevice, LVMLogicalVolumeDevice, LVMInternalLVtype
 from ...errors import DeviceTreeError, DuplicateVGError
 from ...flags import flags
 from ...size import Size
