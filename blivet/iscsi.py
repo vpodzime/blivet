@@ -76,6 +76,7 @@ def _to_node_infos(variant):
     ret = []
     for info in variant:
         ret.append(NodeInfo(*info))
+    return ret
 
 class iscsi(object):
     """ iSCSI utility class.
@@ -104,7 +105,13 @@ class iscsi(object):
 
         self.__connection = None
 
+        # storaged is modular and we need to make sure it has the iSCSI module
+        # loaded (this also autostarts storaged if it isn't running already)
+        safe_dbus.call_sync(STORAGED_SERVICE, STORAGED_MANAGER_PATH, MANAGER_IFACE,
+                            "EnableModules", GLib.Variant("(b)", (True,)), connection=self._connection)
+
         if flags.ibft:
+            import time; time.sleep(5)
             try:
                 initiatorname = self._call_initiator_method("GetFirmwareInitiatorName")[0]
                 self._initiator = initiatorname
@@ -114,6 +121,10 @@ class iscsi(object):
 
     # So that users can write iscsi() to get the singleton instance
     def __call__(self):
+        return self
+
+    def __deepcopy__(self, memo_dict):
+        # pylint: disable=unused-argument
         return self
 
     @property
@@ -196,16 +207,17 @@ class iscsi(object):
             extra = dict()
         extra["node.startup"] = GLib.Variant("s", "automatic")
 
-        args = GLib.Variant("(sisisa{sv})", tuple(list(*node_info) + [extra]))
+        args = GLib.Variant("(sisisa{sv})", tuple(list(node_info) + [extra]))
         self._call_initiator_method("Login", args)
 
     def _startIBFT(self):
         if not flags.ibft:
             return
 
+        args = GLib.Variant("(a{sv})", ([], ))
         try:
-            found_nodes, _n_nodes = self._call_initiator_method("DiscoverFirmware")
-        except Exception: # pylint: disable=broad-except
+            found_nodes, _n_nodes = self._call_initiator_method("DiscoverFirmware", args)
+        except safe_dbus.DBusCallError:
             log_exception_info(log.info, "iscsi: No IBFT info found.")
             # an exception here means there is no ibft firmware, just return
             return
@@ -286,10 +298,6 @@ class iscsi(object):
         util.run_program([ISCSID])
         time.sleep(1)
 
-        # storaged is modular and we need to make sure it has the iSCSI module
-        # loaded (this also autostarts storaged if it isn't running already)
-        safe_dbus.call_sync(STORAGED_SERVICE, STORAGED_MANAGER_PATH, MANAGER_IFACE,
-                            "EnableModules", connection=self._connection)
         self._startIBFT()
         self.started = True
 
@@ -328,7 +336,7 @@ class iscsi(object):
             if r_password:
                 auth_info["r_password"] = GLib.Variant("s", r_password)
 
-            args = GLib.Variant("(sqa{sv}", tuple(ipaddr, port, auth_info))
+            args = GLib.Variant("(sqa{sv})", (ipaddr, int(port), auth_info))
             nodes, _n_nodes = self._call_initiator_method("DiscoverSendTargets", args)
 
             found_nodes = _to_node_infos(nodes)

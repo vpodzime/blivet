@@ -143,12 +143,9 @@ def call_sync(service, obj_path, iface, method, args,
                        (method, obj_path, args, gerr.message)
         raise DBusCallError(msg)
 
-    if ret is None:
-        msg = "No return from %s method on %s with %s arguments" % \
-                       (method, obj_path, args)
-        raise DBusCallError(msg)
-
-    return ret.unpack()
+    if ret is not None:
+        ret = ret.unpack()
+    return ret
 
 def get_property_sync(service, obj_path, iface, prop_name,
                       connection=None):
