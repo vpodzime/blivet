@@ -520,8 +520,7 @@ class LVMVolumeGroupDevice(ContainerDevice):
 
         # reserved percent/space
 
-    @classmethod
-    def is_name_valid(cls, name):
+    def is_name_valid(self, name):
         # No . or ..
         if name == '.' or name == '..':
             return False
@@ -947,7 +946,8 @@ class LVMInternalLVtype(Enum):
 
 
 class LVMInternalLogicalVolumeMixin(object):
-    def __init__(self, parent_lv, lv_type):
+    def __init__(self, vg, parent_lv, lv_type):
+        self._vg = vg
         self._parent_lv = parent_lv
         self._lv_type = lv_type
         if parent_lv:
@@ -960,10 +960,16 @@ class LVMInternalLogicalVolumeMixin(object):
 
     @property
     def is_internal_lv(self):
-        return bool(self._parent_lv)
+        return bool(self._parent_lv or self._lv_type)
 
     @property
-    @util.requires_property("is_internal_lv")
+    def vg(self):
+        if self._parent_lv:
+            return self._parent_lv.vg
+        else:
+            return self._vg
+
+    @property
     def parent_lv(self):
         return self._parent_lv
 
@@ -1012,7 +1018,7 @@ class LVMInternalLogicalVolumeMixin(object):
 
     @property
     def resizable(self):
-        if DMDevice.resizable(self) and self._lv_type is LVMInternalLVtype.meta:
+        if DMDevice.resizable.__get__(self) and self._lv_type is LVMInternalLVtype.meta:
             if self._parent_lv:
                 return self._parent_lv.is_thin_pool
             else:
@@ -1032,12 +1038,10 @@ class LVMInternalLogicalVolumeMixin(object):
         # resize() method of the LVMLogicalVolumeDevice
         raise NotTypeSpecific()
 
-    # TODO: SOLVE THIS!
-    # @classmethod
-    # def is_name_valid(cls, name):
-    #     # override checks for normal LVs, internal LVs typically have names that
-    #     # are forbidden for normal LVs
-    #     return True
+    def is_name_valid(self, name):
+        # override checks for normal LVs, internal LVs typically have names that
+        # are forbidden for normal LVs
+        return True
 
     def _check_parents(self):
         # an internal LV should have no parents
@@ -1070,19 +1074,6 @@ class LVMInternalLogicalVolumeMixin(object):
             return self._parent_lv.max_size
         else:
             return self.size + self.vg.free_space
-
-    def __repr__(self):
-        s = "%s:\n" % self.__class__.__name__
-        s += ("  name = %s, status = %s exists = %s\n" % (self.lvname, self.status, self.exists))
-        s += ("  uuid = %s, size = %s\n" % (self.uuid, self.size))
-        s += ("  parent LV = %r\n" % self.parent_lv)
-        s += ("  VG device = %(vgdev)r\n"
-              "  segment type = %(type)s percent = %(percent)s\n"
-              "  VG space used = %(vgspace)s" %
-              {"vgdev": self.vg, "percent": self.req_percent,
-               "type": self.seg_type,
-               "vgspace": self.vg_space_used})
-        return s
 
     # generally changes should be done on the parent LV (exceptions should
     # override these)
@@ -1583,14 +1574,18 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
             :type profile: :class:`~.devicelibs.lvm.ThPoolProfile` or NoneType
         """
 
-        if parent_lv:
+        if isinstance(parents, (list, ParentList)):
+            vg = parents[0]
+        else:
+            vg = parents
+        if parent_lv or int_type:
             # internal LVs are not in the DeviceTree and doesn't have the
             # parent<->child relation like other devices
             parents = None
 
         self.seg_type = seg_type
 
-        LVMInternalLogicalVolumeMixin.__init__(self, parent_lv, int_type)
+        LVMInternalLogicalVolumeMixin.__init__(self, vg, parent_lv, int_type)
         LVMSnapshotMixin.__init__(self, origin, vorigin)
         LVMThinPoolMixin.__init__(self, metadata_size, chunk_size, profile)
         LVMThinLogicalVolumeMixin.__init__(self)
@@ -1626,7 +1621,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
             if hasattr(cls, name):
                 try:
                     # found, check if it is a method or property
-                    if isinstance(vars(cls)[name], property):
+                    if isinstance(getattr(cls, name), property):
                         if len(args) == 0 and len(kwargs.keys()) == 0:
                             # no *args nor **kwargs -> call the getter
                             ret = getattr(cls, name).__get__(self)
@@ -1658,7 +1653,6 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
 
         return decorated
 
-    @type_specific
     def __repr__(self):
         s = DMDevice.__repr__(self)
         s += ("  VG device = %(vgdev)r\n"
@@ -1667,6 +1661,9 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
               {"vgdev": self.vg, "percent": self.req_percent,
                "type": self.seg_type,
                "vgspace": self.vg_space_used})
+        if self.parent_lv:
+            s += "  parent LV = %r\n" % self.parent_lv
+
         return s
 
     @type_specific
@@ -1934,12 +1931,12 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
     def populate_ksdata(self, data):
         LVMLogicalVolumeBase.populate_ksdata(self, data)
 
-    @classmethod
-    def is_name_valid(cls, name):
+    @type_specific
+    def is_name_valid(self, name):
         # Check that the LV name is valid
 
         # Start with the checks shared with volume groups
-        if not LVMVolumeGroupDevice.is_name_valid(name):
+        if not LVMVolumeGroupDevice.is_name_valid(self, name):
             return False
 
         # And now the ridiculous ones
