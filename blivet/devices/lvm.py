@@ -582,10 +582,6 @@ class LVMLogicalVolumeBase(DMDevice, RaidDevice):
                             sysfs_path=sysfs_path, parents=parents,
                             exists=exists)
 
-        if parents and isinstance(parents[0], LVMVolumeGroupDevice):
-            self._vg = parents[0]
-        else:
-            self._vg = None
         self.uuid = uuid
         self.seg_type = seg_type or "linear"
         self._raid_level = None
@@ -644,11 +640,6 @@ class LVMLogicalVolumeBase(DMDevice, RaidDevice):
             return
         for spec in self._pv_specs:
             spec.size = self._raid_level.get_base_member_size(self.size + self._metadata_size, len(self._pv_specs))
-
-    @property
-    def vg(self):
-        """This Logical Volume's Volume Group."""
-        return self._vg
 
     @property
     def members(self):
@@ -961,7 +952,11 @@ class LVMInternalLogicalVolumeMixin(object):
         self._lv_type = lv_type
         if parent_lv:
             self._parent_lv.add_internal_lv(self)
-            self._vg = self._parent_lv.vg
+
+    def _init_check(self):
+        # an internal LV should have no parents
+        if self._parent_lv and self._parents:
+            raise ValueError("an internal LV should have no parents")
 
     @property
     def is_internal_lv(self):
@@ -979,7 +974,6 @@ class LVMInternalLogicalVolumeMixin(object):
         self._parent_lv = parent_lv
         if self._parent_lv:
             self._parent_lv.add_internal_lv(self)
-            self._vg = self._parent_lv.vg
 
     @property
     @util.requires_property("is_internal_lv")
@@ -1143,25 +1137,26 @@ class LVMSnapshotMixin(object):
         self.vorigin = vorigin
         """ a boolean flag indicating a vorigin snapshot """
 
+    def _init_check(self):
         if not self.is_snapshot_lv:
             # not a snapshot, nothing more to be done
             return
 
-        if origin and not origin.exists:
-            raise ValueError("lvm snapshot origin volume must already exist")
-        if vorigin and not self.exists:
-            raise ValueError("only existing vorigin snapshots are supported")
+        if self.origin and not self.origin.exists:
+            raise ValueError("lvm snapshot self.origin volume must already exist")
+        if self.vorigin and not self.exists:
+            raise ValueError("only existing vself.origin snapshots are supported")
 
-        if isinstance(origin, LVMLogicalVolumeDevice) and \
+        if isinstance(self.origin, LVMLogicalVolumeDevice) and \
            isinstance(self.parents[0], LVMVolumeGroupDevice) and \
-           origin.vg != self.parents[0]:
-            raise ValueError("lvm snapshot and origin must be in the same vg")
+           self.origin.vg != self.parents[0]:
+            raise ValueError("lvm snapshot and self.origin must be in the same vg")
 
-        if origin and not isinstance(origin, LVMLogicalVolumeDevice):
-            raise ValueError("lvm snapshot origin must be a logical volume")
+        if self.origin and not isinstance(self.origin, LVMLogicalVolumeDevice):
+            raise ValueError("lvm snapshot self.origin must be a logical volume")
 
         if self.is_thin_lv:
-            if origin and self.size and not self.exists:
+            if self.origin and self.size and not self.exists:
                 raise ValueError("thin snapshot size is determined automatically")
 
     @property
@@ -1326,15 +1321,17 @@ class LVMSnapshotMixin(object):
 
 class LVMThinPoolMixin(object):
     def __init__(self, metadata_size=None, chunk_size=None, profile=None):
-        if metadata_size is not None and not blockdev.lvm.is_valid_thpool_md_size(metadata_size):
-            raise ValueError("invalid metadatasize value")
-
-        if chunk_size is not None and not blockdev.lvm.is_valid_thpool_chunk_size(chunk_size):
-            raise ValueError("invalid chunksize value")
-
         self._metadata_size = metadata_size or Size(0)
         self._chunk_size = chunk_size or Size(0)
         self._profile = profile
+        self._lvs = []
+
+    def _init_check(self):
+        if self._metadata_size and not blockdev.lvm.is_valid_thpool_md_size(self._metadata_size):
+            raise ValueError("invalid metadatasize value")
+
+        if self._chunk_size and not blockdev.lvm.is_valid_thpool_chunk_size(self._chunk_size):
+            raise ValueError("invalid chunksize value")
 
     @property
     def is_thin_pool(self):
@@ -1425,21 +1422,36 @@ class LVMThinPoolMixin(object):
 
 class LVMThinLogicalVolumeMixin(object):
     def __init__(self):
-        if self.is_thin_lv:
-            # parents[0] is the pool, not the VG so set the VG here
-            self._vg = self.pool.vg
+        pass
+
+    def _init_check(self):
+        pass
+
+    def _check_parents(self):
+        """Check that this device has parents as expected"""
+        if isinstance(self.parents, (list, ParentList)):
+            if len(self.parents) != 1:
+                raise ValueError("constructor requires a single thin-pool LV")
+
+            container = self.parents[0]
+        else:
+            container = self.parents
+
+        if not container or not isinstance(container, LVMLogicalVolumeDevice) or not container.is_thin_pool:
+            raise ValueError("constructor requires a thin-pool LV")
 
     @property
     def is_thin_lv(self):
         return self.seg_type == "thin"
 
     @property
-    def type(self):
-        return "lvmthinlv"
+    def vg(self):
+        # parents[0] is the pool, not the VG so set the VG here
+        return self.pool.vg
 
     @property
-    def container_type(self):
-        return "thin-pool"
+    def type(self):
+        return "lvmthinlv"
 
     @property
     @util.requires_property("is_thin_lv")
@@ -1576,6 +1588,8 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
             # parent<->child relation like other devices
             parents = None
 
+        self.seg_type = seg_type
+
         LVMInternalLogicalVolumeMixin.__init__(self, parent_lv, int_type)
         LVMSnapshotMixin.__init__(self, origin, vorigin)
         LVMThinPoolMixin.__init__(self, metadata_size, chunk_size, profile)
@@ -1584,7 +1598,10 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
                                       fmt, exists, sysfs_path, grow, maxsize,
                                       percent, cache_request, pvs)
 
-        # TODO: call checks here!
+        LVMInternalLogicalVolumeMixin._init_check(self)
+        LVMSnapshotMixin._init_check(self)
+        LVMThinPoolMixin._init_check(self)
+        LVMThinLogicalVolumeMixin._init_check(self)
 
         # check that we got parents as expected and add this device to them now
         # that it is fully-initialized
@@ -1595,11 +1612,11 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         ret = []
         if self.is_internal_lv:
             ret.append(LVMInternalLogicalVolumeMixin)
-        elif self.is_snapshot_lv:
+        if self.is_snapshot_lv:
             ret.append(LVMSnapshotMixin)
-        elif self.is_thin_pool:
+        if self.is_thin_pool:
             ret.append(LVMThinPoolMixin)
-        elif self.is_thin_lv:
+        if self.is_thin_lv:
             ret.append(LVMThinLogicalVolumeMixin)
         return ret
 
@@ -1632,7 +1649,7 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
     def type_specific(meth):
         @wraps(meth)
         def decorated(self, *args, **kwargs):
-            found, ret = self._try_specific_call(meth.__name__, self, *args, **kwargs)
+            found, ret = self._try_specific_call(meth.__name__, *args, **kwargs)
             if found:
                 # nothing more to do here
                 return ret
@@ -1657,20 +1674,29 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
         """Check that this device has parents as expected"""
         if isinstance(self.parents, (list, ParentList)):
             if len(self.parents) != 1:
-                raise ValueError("constructor requires a single %s LV" % self.container_type)
+                raise ValueError("constructor requires a single LVMVolumeGroupDevice")
 
             container = self.parents[0]
         else:
             container = self.parents
 
-        if (container.seg_type != self.container_type):
-            raise ValueError("constructor requires a %s LV" % self.container_type)
+        if not isinstance(container, LVMVolumeGroupDevice):
+            raise ValueError("constructor requires a LVMVolumeGroupDevice")
 
     @type_specific
     def _add_to_parents(self):
         """Add this device to its parents"""
         # a normal LV has only exactly one parent -- the VG it belongs to
         self._parents[0]._add_log_vol(self)
+
+    @property
+    @type_specific
+    def vg(self):
+        """This Logical Volume's Volume Group."""
+        if self._parents:
+            return self._parents[0]
+        else:
+            return None
 
     @type_specific
     def _set_size(self, size):
@@ -1734,12 +1760,12 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
     @property
     @type_specific
     def growable(self):
-        return DMDevice.growable(self)
+        return DMDevice.growable.__get__(self)
 
     @property
     @type_specific
     def readonly(self):
-        return DMDevice.readonly(self)
+        return DMDevice.readonly.__get__(self)
 
     @property
     @type_specific
@@ -1862,18 +1888,13 @@ class LVMLogicalVolumeDevice(LVMLogicalVolumeBase, LVMInternalLogicalVolumeMixin
 
     @property
     @type_specific
-    def container_class(self):
-        return LVMVolumeGroupDevice
-
-    @property
-    @type_specific
     def resizable(self):
-        return DMDevice.resizable(self)
+        return DMDevice.resizable.__get__(self)
 
     @property
     @type_specific
     def format_immutable(self):
-        return DMDevice.format_immutable(self)
+        return DMDevice.format_immutable.__get__(self)
 
     @type_specific
     def _get_parted_device_path(self):
