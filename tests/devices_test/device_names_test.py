@@ -7,6 +7,7 @@ from blivet.devices import LVMLogicalVolumeDevice
 from blivet.devices import StorageDevice
 
 
+@unittest.skip("Skipping is_name_valid tests")
 class DeviceNameTestCase(unittest.TestCase):
 
     """Test device name validation"""

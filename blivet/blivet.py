@@ -961,7 +961,7 @@ class Blivet(object, metaclass=SynchronizedMeta):
             if cache_req:
                 raise ValueError("Creating cached thin volumes and pools is not supported")
 
-        return device_class(name, *args, **kwargs)
+        return LVMLogicalVolumeDevice(name, *args, **kwargs)
 
     def new_btrfs(self, *args, **kwargs):
         """ Return a new BTRFSVolumeDevice or BRFSSubVolumeDevice.
