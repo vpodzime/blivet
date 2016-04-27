@@ -149,6 +149,8 @@ class Blivet(object, metaclass=SynchronizedMeta):
 
         if not flags.installer_mode:
             self.devicetree.handle_nodev_filesystems()
+        from .util import counter
+        print("Waiting for processes: %0.8fs" % counter[0])
 
     @property
     def devices(self):

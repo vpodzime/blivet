@@ -70,8 +70,17 @@ warnings.simplefilter('module', DeprecationWarning)
 # Enable logging of python warnings.
 logging.captureWarnings(True)
 
+import time
+from .util import counter
+start = 0
 # XXX: respect the level? Need to translate between C and Python log levels.
-log_bd_message = lambda level, msg: program_log.info(msg)
+def log_bd_message(level, msg):
+    global start
+    if msg.startswith("Running ["):
+        start = time.time()
+    elif msg.startswith("...done"):
+        counter[0] = counter[0] + time.time() - start
+    program_log.info(msg)
 
 import gi
 gi.require_version("GLib", "2.0")

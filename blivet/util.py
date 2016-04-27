@@ -38,6 +38,8 @@ from threading import Lock
 # this will get set to anaconda's program_log_lock in enable_installer_mode
 program_log_lock = Lock()
 
+import time
+counter = [0]
 
 class Path(str):
 
@@ -181,6 +183,7 @@ def _run_program(argv, root='/', stdin=None, env_prune=None, stderr_to_stdout=Fa
         else:
             stderr_dir = subprocess.PIPE
         try:
+            start = time.time()
             proc = subprocess.Popen(argv,
                                     stdin=stdin,
                                     stdout=subprocess.PIPE,
@@ -189,6 +192,8 @@ def _run_program(argv, root='/', stdin=None, env_prune=None, stderr_to_stdout=Fa
                                     preexec_fn=chroot, cwd=root, env=env)
 
             out, err = proc.communicate()
+            end = time.time()
+            counter[0] = counter[0] + (end - start)
             if not binary_output and six.PY3:
                 out = out.decode("utf-8")
             if out:
