@@ -46,8 +46,8 @@ class DiskLabelFormatPopulator(FormatPopulator):
         # XXX ignore disklabels on multipath or biosraid member disks
         return (bool(udev.device_get_disklabel_type(data)) and
                 not udev.device_is_biosraid_member(data) and
-                udev.device_get_format(data) != "iso9660" and
-                not (device.is_disk and blockdev.mpath_is_mpath_member(device.path)))
+                udev.device_get_format(data) != "iso9660") # and
+                #not (device.is_disk and blockdev.mpath_is_mpath_member(device.path)))
 
     def _get_kwargs(self):
         kwargs = super()._get_kwargs()
