@@ -143,6 +143,7 @@ def determine_parent_lv(vg_name, internal_lv, lvs):
     :type lvs: :class:`~.devices.lvm.LMVLogicalVolumeDevice`
 
     """
+    return None
     # try name matching first (fast, cheap, often works)
     for lv in lvs:
         if internal_lv.lvname == lv.lvname:
