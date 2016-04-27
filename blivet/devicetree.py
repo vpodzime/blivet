@@ -77,6 +77,8 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
             :type exclusive_disks: list
         """
         self.reset(ignored_disks, exclusive_disks)
+        self._devices_by_name = dict()
+        self._devices_by_uuid = dict()
 
     def reset(self, ignored_disks=None, exclusive_disks=None):
         """ Reset the instance to its initial state.
@@ -151,7 +153,7 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
             Raise ValueError if the device's identifier is already
             in the list.
         """
-        if newdev.uuid and newdev.uuid in [d.uuid for d in self._devices] and \
+        if newdev.uuid and newdev.uuid in self._devices_by_uuid and \
            not isinstance(newdev, NoDevice):
             raise ValueError("device is already in tree")
 
@@ -162,6 +164,11 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
 
         newdev.add_hook(new=new)
         self._devices.append(newdev)
+        self._devices_by_name[newdev.name] = newdev
+        if isinstance(newdev, _LVM_DEVICE_CLASSES):
+            self._devices_by_name[newdev.name.replace("--", "-")] = newdev
+        if newdev.uuid:
+            self._devices_by_uuid[newdev.uuid] = newdev
 
         # don't include "req%d" partition names
         if ((newdev.type != "partition" or
@@ -212,6 +219,9 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
                         device.update_name()
 
         self._devices.remove(dev)
+        del(self._devices_by_name[dev.name])
+        if dev.uuid:
+            del(self._devices_by_uuid[dev.uuid])
         record_change(DeviceRemoved(device=dev))
         log.info("removed %s %s (id %d) from device tree", dev.type,
                  dev.name,
@@ -518,10 +528,9 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
         log_method_call(self, name=name, incomplete=incomplete, hidden=hidden)
         result = None
         if name:
-            devices = self._filter_devices(incomplete=incomplete, hidden=hidden)
-            result = next((d for d in devices if d.name == name or
-                           (isinstance(d, _LVM_DEVICE_CLASSES) and d.name == name.replace("--", "-"))),
-                          None)
+            result = self._devices_by_name.get(name)
+            if result and (incomplete and not getattr(result, "complete", True)) or (hidden and result in self._hidden):
+                result = None
         log_method_return(self, result)
         return result
 
