@@ -75,6 +75,8 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
             :type conf: :class:`~.StorageDiscoveryConfig`
         """
         self.reset(conf)
+        self._devices_by_name = dict()
+        self._devices_by_uuid = dict()
 
     def reset(self, conf=None):
         """ Reset the instance to its initial state. """
@@ -143,7 +145,7 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
             Raise ValueError if the device's identifier is already
             in the list.
         """
-        if newdev.uuid and newdev.uuid in [d.uuid for d in self._devices] and \
+        if newdev.uuid and newdev.uuid in self._devices_by_uuid and \
            not isinstance(newdev, NoDevice):
             raise ValueError("device is already in tree")
 
@@ -154,6 +156,11 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
 
         newdev.add_hook(new=new)
         self._devices.append(newdev)
+        self._devices_by_name[newdev.name] = newdev
+        if isinstance(newdev, _LVM_DEVICE_CLASSES):
+            self._devices_by_name[newdev.name.replace("--", "-")] = newdev
+        if newdev.uuid:
+            self._devices_by_uuid[newdev.uuid] = newdev
 
         # don't include "req%d" partition names
         if ((newdev.type != "partition" or
@@ -204,6 +211,15 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
                         device.update_name()
 
         self._devices.remove(dev)
+        del(self._devices_by_name[dev.name])
+        try:
+            if isinstance(dev, _LVM_DEVICE_CLASSES):
+                del(self._devices_by_name[dev.name.replace("--", "-")])
+        except KeyError:
+            # cannot remove twice in case there was no "--" in the name
+            pass
+        if dev.uuid:
+            del(self._devices_by_uuid[dev.uuid])
         record_change(DeviceRemoved(device=dev))
         log.info("removed %s %s (id %d) from device tree", dev.type,
                  dev.name,
@@ -476,8 +492,14 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
         log_method_call(self, uuid=uuid, incomplete=incomplete, hidden=hidden)
         result = None
         if uuid:
-            devices = self._filter_devices(incomplete=incomplete, hidden=hidden)
-            result = next((d for d in devices if d.uuid == uuid or d.format.uuid == uuid), None)
+            result = self._devices_by_uuid.get(uuid)
+            if (result is None and hidden):
+                # try to search in hidden devices
+                result = next((d for d in self._hidden if d.uuid == uuid), None)
+
+            # filter incomplete devices if requested
+            if result and (not incomplete and not getattr(result, "complete", True)):
+                result = None
         log_method_return(self, result)
         return result
 
@@ -510,10 +532,14 @@ class DeviceTreeBase(object, metaclass=SynchronizedMeta):
         log_method_call(self, name=name, incomplete=incomplete, hidden=hidden)
         result = None
         if name:
-            devices = self._filter_devices(incomplete=incomplete, hidden=hidden)
-            result = next((d for d in devices if d.name == name or
-                           (isinstance(d, _LVM_DEVICE_CLASSES) and d.name == name.replace("--", "-"))),
-                          None)
+            result = self._devices_by_name.get(name)
+            if (result is None and hidden):
+                # try to search in hidden devices
+                result = next((d for d in self._hidden if d.name == name), None)
+
+            # filter incomplete devices if requested
+            if result and (not incomplete and not getattr(result, "complete", True)):
+                result = None
         log_method_return(self, result)
         return result
 
