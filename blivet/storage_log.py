@@ -8,6 +8,7 @@ log.addHandler(logging.NullHandler())
 
 
 def function_name_and_depth():
+    return ("unknown function?", 0)
     IGNORED_FUNCS = ["function_name_and_depth",
                      "log_method_call",
                      "log_method_return"]
