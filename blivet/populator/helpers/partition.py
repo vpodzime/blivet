@@ -56,6 +56,8 @@ class PartitionDevicePopulator(DevicePopulator):
                 return device
 
         disk_name = udev.device_get_partition_disk(self.data)
+        if not disk_name:
+            return
         if disk_name.startswith("md"):
             disk_name = blockdev.md.name_from_node(disk_name)
         disk = self._devicetree.get_device_by_name(disk_name)
