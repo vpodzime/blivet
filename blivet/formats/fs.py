@@ -1350,6 +1350,26 @@ class XFS(FS):
         except OSError as e:
             log.error("failed to run xfs_freeze: %s", e)
 
+    def regenerate_uuid(self, root='/'):
+        """ Generate a new UUID for the *existing* file system
+
+            *The file system cannot be mounted.*
+
+        """
+        if not self.exists:
+            raise FSError("Cannot regenerate UUID for a non-existing XFS file system")
+
+        if self.status:
+            raise FSError("Cannot regenerate UUID for a mounted XFS file system")
+
+        # mount and umount the FS to make sure it is clean
+        tmpdir = tempfile.mkdtemp(prefix="xfs-tmp")
+        self.mount(mountpoint=tmpdir)
+        self.unmount()
+        os.rmdir(tmpdir)
+
+        util.run_program(["xfs_admin", "-U", "generate", self.device], root=root)
+
 register_device_format(XFS)
 
 
