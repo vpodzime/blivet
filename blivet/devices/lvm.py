@@ -967,7 +967,6 @@ class LVMSnapShotBase(object):
 
         """
         fmt = copy.deepcopy(self.origin.format)
-        fmt.exists = False
         if hasattr(fmt, "mountpoint"):
             fmt.mountpoint = ""
             fmt._chrootedMountpoint = None
@@ -1356,6 +1355,12 @@ class LVMThinSnapShotDevice(LVMSnapShotBase, LVMThinLogicalVolumeDevice):
 
         lvm.thinsnapshotcreate(self.vg.name, self._name, self.origin.lvname,
                                pool_name=pool_name)
+
+
+    def _postCreate(self):
+        LVMThinLogicalVolumeDevice._postCreate(self)
+        # the snapshot's format exists if the origin's format exists
+        self.format.exists = self.origin.format.exists
 
     def dependsOn(self, dep):
         # once a thin snapshot exists it no longer depends on its origin
