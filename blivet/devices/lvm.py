@@ -968,7 +968,7 @@ class LVMSnapShotBase(object):
         """
         fmt = copy.deepcopy(self.origin.format)
         if hasattr(fmt, "mountpoint"):
-            fmt.mountpoint = ""
+            fmt._mountpoint = None
             fmt._chrootedMountpoint = None
             fmt.device = self.path # pylint: disable=no-member
 
