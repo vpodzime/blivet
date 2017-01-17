@@ -1364,7 +1364,7 @@ class XFS(FS):
 
         # mount and umount the FS to make sure it is clean
         tmpdir = tempfile.mkdtemp(prefix="xfs-tmp")
-        self.mount(mountpoint=tmpdir)
+        self.mount(mountpoint=tmpdir, options="nouuid")
         self.unmount()
         os.rmdir(tmpdir)
 
