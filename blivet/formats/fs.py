@@ -1368,7 +1368,9 @@ class XFS(FS):
         self.unmount()
         os.rmdir(tmpdir)
 
-        util.run_program(["xfs_admin", "-U", "generate", self.device], root=root)
+        new_uuid = self._getRandomUUID()
+        util.run_program(["xfs_admin", "-U", new_uuid, self.device], root=root)
+        self.uuid = new_uuid
 
 register_device_format(XFS)
 
