@@ -168,6 +168,18 @@ def _schedulePartitions(storage, disks, implicit_devices, min_luks_entropy=0, re
     #
     # First pass is for partitions only. We'll do LVs later.
     #
+
+    # get the maximum number of partitions we can create in total
+    max_parts = 0
+    for dev in storage.partitioned:
+        if hasattr(dev, "max_partitions"):
+            if dev.max_partitions > 0:  # 0 means no limit
+                max_parts += dev.max_partitions
+            else:
+                # one unlimited means no limit in total
+                max_parts = 0
+                break
+
     for request in requests:
         if ((request.lv and storage.doAutoPart and
              storage.autoPartType in (AUTOPART_TYPE_LVM,
@@ -178,7 +190,12 @@ def _schedulePartitions(storage, disks, implicit_devices, min_luks_entropy=0, re
         if request.requiredSpace and request.requiredSpace > free:
             continue
 
-        elif request.fstype in ("prepboot", "efi", "macefi", "hfs+") and \
+        # also check that we can create more partitions
+        if max_parts != 0 and len(storage.partitions) >= max_parts:
+            # cannot create more partitions
+            continue
+
+        if request.fstype in ("prepboot", "efi", "macefi", "hfs+") and \
              (storage.bootloader.skip_bootloader or stage1_device):
             # there should never be a need for more than one of these
             # partitions, so skip them.

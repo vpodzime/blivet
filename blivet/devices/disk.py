@@ -115,6 +115,11 @@ class DiskDevice(StorageDevice):
 
         StorageDevice._preDestroy(self)
 
+    @property
+    def max_partitions(self):
+        # no limit
+        return 0
+
 class DiskFile(DiskDevice):
     """ This is a file that we will pretend is a disk.
 
@@ -562,6 +567,11 @@ class DASDDevice(DiskDevice):
     @property
     def description(self):
         return "DASD device %s" % self.busid
+
+    @property
+    def max_partitions(self):
+        # 3 partitions at most on a DASD (FBA only?)
+        return 3
 
     def getOpts(self):
         return ["%s=%s" % (k, v) for k, v in self.opts.items() if v == '1']
