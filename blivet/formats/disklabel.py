@@ -34,6 +34,7 @@ from ..flags import flags
 from ..i18n import _, N_
 from . import DeviceFormat, register_device_format
 from ..size import Size
+from ..util import flocked
 
 import logging
 log = logging.getLogger("blivet")
@@ -280,13 +281,18 @@ class DiskLabel(DeviceFormat):
         """ Commit the current partition table to disk and notify the OS. """
         log_method_call(self, device=self.device,
                         numparts=len(self.partitions))
-        try:
-            self.parted_disk.commit()
-        except parted.DiskException as msg:
-            raise DiskLabelCommitError(msg)
-        else:
-            self.update_orig_parted_disk()
-            udev.settle()
+        # try to lock the device to prevent udev from reading the partition
+        # table from it (parted does it on its own, but udev may ruin it if
+        # stepping in)
+        with flocked(self.device):
+            try:
+                self.parted_disk.commit()
+            except parted.DiskException as msg:
+                raise DiskLabelCommitError(msg)
+            else:
+                self.update_orig_parted_disk()
+
+        udev.settle()
 
     def commit_to_disk(self):
         """ Commit the current partition table to disk. """

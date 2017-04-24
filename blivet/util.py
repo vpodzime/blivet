@@ -18,6 +18,8 @@ from contextlib import contextmanager
 from functools import wraps
 from collections import namedtuple
 from enum import Enum
+from fcntl import flock, LOCK_SH, LOCK_NB, LOCK_UN
+
 
 from .errors import DependencyError
 
@@ -499,6 +501,22 @@ def reset_file_context(path, root=None):
 def makedirs(path):
     if not os.path.isdir(path):
         os.makedirs(path, 0o755)
+
+@contextmanager
+def flocked(f, fatal=False):
+    fd = -1
+    try:
+        try:
+            fd = os.open(f, os.O_RDONLY)
+            flock(fd, LOCK_SH|LOCK_NB)
+        except OSError:
+            if fatal:
+                raise
+        yield
+    finally:
+        if fd > 0:
+            flock(fd, LOCK_UN)
+            os.close(fd)
 
 
 def copy_to_system(source):
